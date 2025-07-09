@@ -1,0 +1,196 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+library axi_filter_dma_v1_00_a;
+use axi_filter_dma_v1_00_a.all;
+
+--! This component implements noise filtering for a 1 bit black/white image.
+
+--! Two image lines are buffered internally in order to have the values of all
+--! pixels in an 3x3 pixel matrix available for filtering.
+entity filter_major is
+    generic (
+        IMAGE_WIDTH  : integer range 3 to 2047 := 640; --! width of a the input image in pixels
+        IMAGE_HEIGHT : integer range 3 to 2047 := 480; --! height of a the input image in pixels
+        ADDR_WIDTH   : positive := 11;   --! Address width for the line_buffer subcomponent
+        DATA_WIDTH   : positive := 1;    --! Data width for the line_buffer subcomponent
+        PIXEL_COUNT  : positive := 4     --! Threashold for the number of pixels with value '1' in the 3x3 pixel matrix of the noise filter.
+    );
+  Port (
+        clk         : in  std_logic;    --! Clock input
+        rstn        : in  std_logic;    --! Negated asynchronous reset
+        data_in     : in  std_logic;  --! 1 bit black or white input pixel
+        data_rdy    : in  std_logic;  --! Input bit indicating if the input data (#data_in) is ready to be processed
+        result      : out std_logic;  --! Output pixel
+        result_rdy  : out std_logic --! Indicates whether the output (#result) represents a valid pixel
+    );
+end filter_major;
+
+--! rtl implementation of filter_major
+architecture rtl of filter_major is
+
+    component line_buffer is
+    Generic (
+        LINE_LENGTH : positive;
+        ADDR_WIDTH  : positive;
+        DATA_WIDTH  : positive
+    );
+    Port (
+        clk             : in std_logic;
+        rstn            : in std_logic;
+        data_in         : in std_logic;
+        data_rdy        : in std_logic;
+        result          : out std_logic;
+        result_rdy      : out std_logic
+    );
+    end component;
+
+-- STUDENT CODE HERE
+
+  --  Utility: count how many of three bits are ?1?
+    ------------------------------------------------------------------
+    function adder(a : std_logic; b : std_logic; c : std_logic)
+             return integer is
+        variable res : integer := 0;
+    begin
+        if a = '1' then res := res + 1; end if;
+        if b = '1' then res := res + 1; end if;
+        if c = '1' then res := res + 1; end if;
+        return res;
+    end function adder;
+
+    ------------------------------------------------------------------
+    --  Internal signals
+    ------------------------------------------------------------------
+    -- line-buffer I/F
+    signal lb1_out   : std_logic := '0';
+    signal lb1_rdy   : std_logic := '0';
+    signal lb2_out   : std_logic := '0';
+    signal lb2_rdy   : std_logic := '0';
+
+    -- pipeline alignment
+    signal r1_delayed  : std_logic := '0';   -- result1 delayed by 1 clk
+    signal delay       : std_logic := '0';   -- data_in  delayed by 1 clk
+    signal din_delayed : std_logic := '0';   -- data_in  delayed by 2 clk
+
+    -- sliding-window bookkeeping
+    signal store_reg0  : integer range 0 to 3 := 0;  -- newest previous column
+    signal store_reg1  : integer range 0 to 3 := 0;  -- second-newest column
+    signal iterator    : integer range 0 to 2 := 0;  -- counts first two cols
+    signal col_cnt     : integer range 0 to IMAGE_WIDTH-1 := 0;
+
+-- STUDENT CODE until HERE
+
+
+begin
+
+-- STUDENT CODE HERE
+
+ --  Two line buffers ? give access to the two previous image rows
+    ------------------------------------------------------------------
+    lb1 : line_buffer
+        generic map (
+            LINE_LENGTH => IMAGE_WIDTH,
+            ADDR_WIDTH  => ADDR_WIDTH,
+            DATA_WIDTH  => DATA_WIDTH)
+        port map (
+            clk        => clk,
+            rstn       => rstn,
+            data_in    => data_in,
+            data_rdy   => data_rdy,
+            result     => lb1_out,
+            result_rdy => lb1_rdy);
+
+    lb2 : line_buffer
+        generic map (
+            LINE_LENGTH => IMAGE_WIDTH,
+            ADDR_WIDTH  => ADDR_WIDTH,
+            DATA_WIDTH  => DATA_WIDTH)
+        port map (
+            clk        => clk,
+            rstn       => rstn,
+            data_in    => lb1_out,
+            data_rdy   => lb1_rdy,
+            result     => lb2_out,
+            result_rdy => lb2_rdy);
+
+    ------------------------------------------------------------------
+    --  Majority-noise filter (3 × 3 window, threshold = PIXEL_COUNT)
+    ------------------------------------------------------------------
+    process(clk, rstn)
+        variable store : integer range 0 to 3 := 0; -- ones in current column
+        variable sum   : integer range 0 to 9 := 0; -- ones in 3×3 block
+    begin
+        if rstn = '0' then
+            result       <= '0';
+            result_rdy   <= '0';
+            r1_delayed   <= '0';
+            delay        <= '0';
+            din_delayed  <= '0';
+            iterator     <= 0;
+            col_cnt      <= 0;
+            store_reg0   <= 0;
+            store_reg1   <= 0;
+
+        elsif rising_edge(clk) then
+            ------------------------------------------------------------------
+            -- Default outputs
+            ------------------------------------------------------------------
+            result_rdy <= '0';        -- asserted only when pixel is valid
+            -- pipeline delays to align three rows
+            r1_delayed  <= lb1_out;
+            delay       <= data_in;
+            din_delayed <= delay;
+
+            ------------------------------------------------------------------
+            -- Column counter to recognise new image lines
+            ------------------------------------------------------------------
+            if data_rdy = '1' then
+                if col_cnt = IMAGE_WIDTH-1 then          -- end of line
+                    col_cnt    <= 0;
+                    iterator   <= 0;
+                    store_reg0 <= 0;
+                    store_reg1 <= 0;
+                else
+                    col_cnt <= col_cnt + 1;
+                end if;
+            end if;
+
+            ------------------------------------------------------------------
+            -- Core filter ? active only when all three rows are valid
+            ------------------------------------------------------------------
+            if lb2_rdy = '1' then
+                -- ones in current column of 3×3 window
+                store := adder(din_delayed, r1_delayed, lb2_out);
+
+                -- After the first two columns have been seen,
+                -- we have a full 3×3 block every cycle
+                if iterator = 2 then
+                    sum := store + store_reg0 + store_reg1;
+                    if sum >= PIXEL_COUNT then
+                        result <= '1';
+                    else
+                        result <= '0';
+                    end if;
+                    result_rdy <= '1';
+                end if;
+
+                -- Shift the column-sum pipeline
+                store_reg1 <= store_reg0;
+                store_reg0 <= store;
+
+                -- Increment iterator until it saturates at 2
+                if iterator < 2 then
+                    iterator <= iterator + 1;
+                end if;
+            end if;
+        end if;
+    end process;
+
+-- STUDENT CODE until HERE
+
+
+
+end rtl;
+

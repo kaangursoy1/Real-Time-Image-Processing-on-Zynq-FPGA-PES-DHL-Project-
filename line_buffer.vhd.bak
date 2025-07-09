@@ -1,0 +1,186 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+library axi_filter_dma_v1_00_a;
+use axi_filter_dma_v1_00_a.all;
+
+--! This component buffers the pixels of one line in the input image
+
+--! The component implements a FIFO buffer with a depth of #LINE_LENGTH.
+--! If #data_rdy is '1' the first element in the FIFO queue will be removed
+--! and the input from #data_in is pushed to the end of the queue.
+entity line_buffer is
+    Generic (
+        LINE_LENGTH : positive;   --! Length of the lines in the image
+        ADDR_WIDTH  : positive;   --! Address width for the ram_dp subcomponent
+        DATA_WIDTH  : positive    --! Data width for the ram_dp subcomponent
+    );
+  Port (
+        clk             : in std_logic;     --! Clock input
+        rstn            : in std_logic;     --! Negated asynchronous reset
+        data_in         : in std_logic;  --! Input to be pushed to the FIFO
+        data_rdy        : in std_logic;   --! Input bit indicating if the current input data (#data_in) should be pushed to the back of the FIFO queue
+        result          : out std_logic;  --! Outputs the element at the front of the FIFO queue
+        result_rdy      : out std_logic --! If #result_rdy is '1', the front element (accessible through #result) will be removed from the FIFO queue until the next clock cycle
+    );
+end line_buffer;
+
+architecture rtl of line_buffer is
+
+    component ram_dp is
+    Generic (
+        ADDR_WIDTH : positive;
+        DATA_WIDTH : positive;
+        USE_OUTPUT_REG : std_logic  := '0'
+    );
+    Port(
+        clk     : in std_logic;
+        wena    : in std_logic;
+        wenb    : in std_logic;
+        addra   : in std_logic_vector(ADDR_WIDTH-1 downto 0);
+        addrb   : in std_logic_vector(ADDR_WIDTH-1 downto 0);
+        dina    : in std_logic_vector(DATA_WIDTH-1 downto 0);
+        dinb    : in std_logic_vector(DATA_WIDTH-1 downto 0);
+        douta   : out std_logic_vector(DATA_WIDTH-1 downto 0);
+        doutb   : out std_logic_vector(DATA_WIDTH-1 downto 0)
+    );
+    end component;
+
+-- STUDENT CODE HERE
+   ------------------------------------------------------------------
+    --  Dahili sabitler ve sinyaller
+    ------------------------------------------------------------------
+    constant LAST_ADDR        : unsigned(ADDR_WIDTH-1 downto 0) :=
+                                 to_unsigned(LINE_LENGTH-1, ADDR_WIDTH);
+    constant LAST_ADDR_MINUS1 : unsigned(ADDR_WIDTH-1 downto 0) :=
+                                 to_unsigned(LINE_LENGTH-2, ADDR_WIDTH);
+
+    -- FIFO göstergeleri
+    signal wr_ptr : unsigned(ADDR_WIDTH-1 downto 0) := (others => '0');
+    signal rd_ptr : unsigned(ADDR_WIDTH-1 downto 0) := (others => '0');
+
+    -- Bir sat?rl?k tampon dolduysa ?1?
+    signal line_full : std_logic := '0';
+
+    -- BRAM ba?lant?lar?
+    signal bram_q  : std_logic_vector(DATA_WIDTH-1 downto 0);
+    signal din_vec : std_logic_vector(DATA_WIDTH-1 downto 0);
+
+    -- 1-clk yazma boru hatt?
+    signal data_for_wr : std_logic := '0';
+    signal data_rdy_d  : std_logic := '0';
+    -- STUDENT CODE until HERE
+
+begin
+
+-- STUDENT CODE HERE
+    ------------------------------------------------------------------
+    -- 1-bit giri?i DATA_WIDTH-bit vektöre dönü?tür
+    ------------------------------------------------------------------
+    din_vec_proc : process(data_for_wr)
+    begin
+        din_vec      <= (others => '0');
+        din_vec(0)   <= data_for_wr;
+    end process;
+
+    ------------------------------------------------------------------
+    -- 1-clk yazma gecikmesi (boru hatt?)
+    ------------------------------------------------------------------
+    delay_pipe : process(clk, rstn)
+    begin
+        if rstn = '0' then
+            data_for_wr <= '0';
+            data_rdy_d  <= '0';
+        elsif rising_edge(clk) then
+            data_for_wr <= data_in;   -- pikseli sakla
+            data_rdy_d  <= data_rdy;  -- write-enable?i sakla
+        end if;
+    end process;
+
+    ------------------------------------------------------------------
+    -- Dual-port BRAM : Port-A = write (gecikmeli), Port-B = read
+    ------------------------------------------------------------------
+    buf : ram_dp
+        generic map (
+            ADDR_WIDTH      => ADDR_WIDTH,
+            DATA_WIDTH      => DATA_WIDTH,
+            USE_OUTPUT_REG  => '0')
+        port map (
+            clk   => clk,
+            -- Port-A (write)
+            wena  => data_rdy_d,
+            addra => std_logic_vector(wr_ptr),
+            dina  => din_vec,
+            -- Port-B (read)
+            wenb  => '0',
+            addrb => std_logic_vector(rd_ptr),
+            dinb  => (others => '0'),
+            douta => open,
+            doutb => bram_q
+        );
+
+    ------------------------------------------------------------------
+    -- Pointer kontrolü ve ç?k?? üretimi
+    ------------------------------------------------------------------
+    process(clk, rstn)
+    begin
+        if rstn = '0' then
+            wr_ptr     <= (others => '0');
+            rd_ptr     <= (others => '0');
+            line_full  <= '0';
+            result     <= '0';
+            result_rdy <= '0';
+
+        elsif rising_edge(clk) then
+            ----------------------------------------------------------
+            -- Ç?k?? geçerlilik i?areti (okuma çevriminde)
+            ----------------------------------------------------------
+            result_rdy <= line_full and data_rdy;
+
+            ----------------------------------------------------------
+            -- BRAM?den okunan veri
+            ----------------------------------------------------------
+            if line_full = '1' then
+                result <= bram_q(0);
+            else
+                result <= '0';
+            end if;
+
+            ----------------------------------------------------------------
+            -- Sat?r?n doldu?unu 1 clk ERKEN tespit et
+            --  (son piksel gelmeden bir çevrim önce)
+            ----------------------------------------------------------------
+            if line_full = '0' then
+                if (data_rdy = '1') and (wr_ptr = LAST_ADDR_MINUS1) then
+                    line_full <= '1';                 -- erken set
+                end if;
+            end if;
+
+            ----------------------------------------------------------
+            -- WR_PTR güncelle (gecikmeli yazma faz?nda)
+            ----------------------------------------------------------
+            if data_rdy_d = '1' then
+                if wr_ptr = LAST_ADDR then
+                    wr_ptr <= (others => '0');
+                else
+                    wr_ptr <= wr_ptr + 1;
+                end if;
+            end if;
+
+            ----------------------------------------------------------
+            -- RD_PTR güncelle (giri? verisi faz?nda)
+            ----------------------------------------------------------
+            if (data_rdy = '1') and (line_full = '1') then
+                if rd_ptr = LAST_ADDR then
+                    rd_ptr <= (others => '0');
+                else
+                    rd_ptr <= rd_ptr + 1;
+                end if;
+            end if;
+        end if; -- rising_edge
+    end process;
+    -- STUDENT CODE until HERE
+
+end rtl;
+
